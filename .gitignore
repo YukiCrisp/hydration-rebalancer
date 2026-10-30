@@ -3,3 +3,4 @@ dist/
 
 *.log
 web/app.js
+.DS_Store

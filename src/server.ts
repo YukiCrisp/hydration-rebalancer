@@ -21,6 +21,22 @@ const MIME: Record<string, string> = {
   '.map': 'application/json',
 };
 
+// Only answer requests addressed to this server by its loopback name. Another
+// site can still make the browser send requests here (CSRF, or DNS rebinding
+// with a foreign Host); these checks refuse both.
+const ALLOWED_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`, `[::1]:${PORT}`, `${HOST}:${PORT}`]);
+const SECURITY_HEADERS = {
+  'x-frame-options': 'DENY',
+  'content-security-policy': "frame-ancestors 'none'",
+  'x-content-type-options': 'nosniff',
+};
+
+function clamp(value: unknown, min: number, max: number, name: string): number {
+  const n = Number(value);
+  if (!Number.isFinite(n) || n < min || n > max) throw new Error(`${name} must be between ${min} and ${max}`);
+  return n;
+}
+
 const toJsonPosition = (p: Position) => ({ ...p, balance: p.balance.toFixed() });
 
 async function market(chain: Chain, address: string) {
@@ -40,7 +56,20 @@ interface PlanRequest {
   minLegUsd: number;
 }
 
-async function plan(chain: Chain, req: PlanRequest) {
+async function plan(chain: Chain, body: any) {
+  const req: PlanRequest = {
+    address: String(body.address ?? ''),
+    weights: body.weights ?? {},
+    slippagePct: clamp(body.slippagePct, 0.01, 10, 'slippagePct'),
+    minHf: clamp(body.minHf, 1.01, 10, 'minHf'),
+    maxImpactPct: clamp(body.maxImpactPct, 0.01, 20, 'maxImpactPct'),
+    maxChunks: Math.floor(clamp(body.maxChunks, 1, 10, 'maxChunks')),
+    maxUsd: body.maxUsd == null ? undefined : clamp(body.maxUsd, 0, 1e9, 'maxUsd'),
+    minLegUsd: clamp(body.minLegUsd, 0, 1e9, 'minLegUsd'),
+  };
+  const weightIds = Object.keys(req.weights);
+  if (weightIds.length > 64) throw new Error('too many assets');
+  for (const id of weightIds) clamp(req.weights[id], 0, 1e6, 'weight');
   const { who, account, chainHf } = await market(chain, req.address);
   const byReserve = new Map(account.positions.map((p) => [p.reserveId, p]));
   const target = new Map(Object.entries(req.weights).map(([k, v]) => [Number(k), Number(v)]));
@@ -116,7 +145,7 @@ async function body(req: IncomingMessage): Promise<any> {
 }
 
 function send(res: ServerResponse, status: number, data: unknown) {
-  res.writeHead(status, { 'content-type': 'application/json' });
+  res.writeHead(status, { 'content-type': 'application/json', ...SECURITY_HEADERS });
   res.end(JSON.stringify(data));
 }
 
@@ -125,7 +154,11 @@ async function serveStatic(res: ServerResponse, path: string) {
   if (!file.startsWith(WEB_DIR)) return send(res, 404, { error: 'not found' });
   try {
     const data = await readFile(file);
-    res.writeHead(200, { 'content-type': MIME[extname(file)] ?? 'application/octet-stream', 'cache-control': 'no-store' });
+    res.writeHead(200, {
+      'content-type': MIME[extname(file)] ?? 'application/octet-stream',
+      'cache-control': 'no-store',
+      ...SECURITY_HEADERS,
+    });
     res.end(data);
   } catch {
     send(res, 404, { error: 'not found' });
@@ -136,6 +169,7 @@ async function main() {
   console.log(`connecting to ${RPC} …`);
   const chain = await connect(RPC);
   const server = createServer(async (req, res) => {
+    if (!ALLOWED_HOSTS.has(req.headers.host ?? '')) return send(res, 421, { error: 'unexpected Host header' });
     const url = new URL(req.url ?? '/', `http://${req.headers.host}`);
     try {
       if (url.pathname === '/api/config') return send(res, 200, { rpc: RPC });
@@ -148,7 +182,13 @@ async function main() {
           frozen: [...m.frozen],
         });
       }
-      if (url.pathname === '/api/plan' && req.method === 'POST') return send(res, 200, await plan(chain, await body(req)));
+      if (url.pathname === '/api/plan' && req.method === 'POST') {
+        // a cross-site page can only send JSON after a CORS preflight, which this server never approves
+        if (!(req.headers['content-type'] ?? '').startsWith('application/json')) {
+          return send(res, 415, { error: 'content-type must be application/json' });
+        }
+        return send(res, 200, await plan(chain, await body(req)));
+      }
       if (req.method === 'GET') return serveStatic(res, url.pathname);
       send(res, 405, { error: 'method not allowed' });
     } catch (e) {

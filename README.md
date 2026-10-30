@@ -29,8 +29,10 @@ Money-market Pool proxy: `0x1b02E051683b5cfaC5929C25E84adb26ECf87B38`. Prices an
 ## Install
 
 ```bash
-cd ~/Documents/hydration-rebalancer && npm install && npm run build
+cd ~/Documents/hydration-rebalancer && npm ci && npm run build
 ```
+
+`npm ci` installs exactly the versions and integrity hashes in `package-lock.json`. Use it rather than `npm install` for a tool that builds transactions.
 
 Node 22 or later. On stderr you will see `@polkadot/util has multiple versions` warnings. The SDK is CJS-only and this CLI is ESM, so both builds of the same version get loaded. They are harmless.
 
@@ -41,6 +43,14 @@ npm run build && npm run ui
 ```
 
 `http://127.0.0.1:5180` を、Talisman を入れたブラウザで開く。サーバーは `127.0.0.1` だけで待ち受ける。鍵は持たず、自分では何も送信しない。使い終わったら Ctrl+C で止める。
+
+開いている別のサイトがこのサーバーを使えないよう、サーバーは次のリクエストを断る。
+
+- Host が `127.0.0.1` や `localhost` 以外のもの（DNS rebinding 対策）
+- `application/json` 以外の POST（CSRF 対策）
+- 範囲外の数値（最大分割数は 10 まで など）
+
+ページは iframe に埋め込めない。
 
 1. 「Talisman に接続」でアカウントを選ぶ。アドレスを貼り付けると、読み取り専用で開く。
 2. 担保にしている資産が表に並ぶ。目標の比率はスライダーで決める。% の欄に数字を入れると、その資産の比率を固定して、残りを今の比で分け直す。「均等にする」「現在の比率に戻す」のボタンもある。「＋ 資産を追加」からは、まだ持っていない資産も選べる（LTV が 0 のものと凍結中のものは除く）。対象から外した担保は動かさないが、HF の計算には入れる。比率を 0 にすると、その資産を売り切る（端数は少し残る）。
