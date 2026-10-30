@@ -1,0 +1,40 @@
+{
+  "name": "hydration-rebalancer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Rebalance Hydration money-market collateral to equal weights in one atomic utility.batchAll",
+  "bin": {
+    "hydration-rebalancer": "dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p . && npm run build:web",
+    "build:web": "tsc -p tsconfig.web.json && esbuild src/web/main.ts --bundle --format=esm --platform=browser --target=es2022 --minify --outfile=web/app.js --log-level=warning",
+    "start": "node dist/cli.js",
+    "ui": "node dist/server.js",
+    "dev": "tsx src/cli.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@galacticcouncil/api-augment": "^0.10.0",
+    "@galacticcouncil/sdk": "10.8.0",
+    "@polkadot/api": "16.4.9",
+    "@polkadot/api-augment": "16.4.9",
+    "@polkadot/types": "16.4.9",
+    "@polkadot/util": "13.5.9",
+    "@polkadot/util-crypto": "13.5.9",
+    "bignumber.js": "^9.3.1",
+    "viem": "^2.38.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  },
+  "overrides": {
+    "@polkadot/util": "13.5.9",
+    "@polkadot/util-crypto": "13.5.9"
+  }
+}

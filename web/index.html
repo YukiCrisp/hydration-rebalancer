@@ -1,0 +1,132 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hydration Rebalancer</title>
+<style>
+:root {
+  --bg: #f6f7f9; --panel: #ffffff; --text: #16191d; --muted: #66707c; --line: #e2e5ea;
+  --accent: #2f6fdf; --accent-text: #ffffff; --good: #1d8a4f; --warn: #b7791f; --bad: #c53030;
+  --track: #e6e9ee; --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111418; --panel: #1a1e24; --text: #e6e9ee; --muted: #9aa4b0; --line: #2b313a;
+    --accent: #5b8ff0; --accent-text: #0b0d10; --good: #4cc38a; --warn: #e0a84a; --bad: #f07171; --track: #2b313a;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Segoe UI", sans-serif; }
+main { max-width: 1120px; margin: 0 auto; padding: 20px 16px 60px; }
+h1 { font-size: 20px; margin: 0 0 4px; }
+h2 { font-size: 15px; margin: 0 0 12px; }
+.sub { color: var(--muted); margin: 0 0 18px; }
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+.row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+button { font: inherit; border: 1px solid var(--line); background: var(--panel); color: var(--text); border-radius: 7px; padding: 6px 12px; cursor: pointer; }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+button:disabled { opacity: .45; cursor: not-allowed; }
+input[type=text], input[type=number], select { font: inherit; color: var(--text); background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+input[type=text] { min-width: 0; flex: 1 1 320px; font-family: var(--mono); font-size: 12px; }
+input[type=number] { width: 76px; }
+.table-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; }
+th, td { text-align: right; padding: 7px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; }
+th:first-child, td:first-child { text-align: left; }
+td.slider { min-width: 220px; }
+td.slider input[type=range] { width: 150px; vertical-align: middle; accent-color: var(--accent); }
+.num { font-variant-numeric: tabular-nums; }
+.muted { color: var(--muted); }
+.good { color: var(--good); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+.tag { font-size: 11px; border: 1px solid var(--line); border-radius: 4px; padding: 0 5px; color: var(--muted); margin-left: 4px; }
+.grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+.gauge { position: relative; height: 12px; background: var(--track); border-radius: 6px; margin: 6px 0 18px; }
+.gauge .fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 6px; }
+.gauge .mark { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--text); opacity: .5; }
+.gauge .mark span { position: absolute; top: 16px; left: -10px; font-size: 10px; color: var(--muted); }
+.gauge .mark.min span { top: -15px; }
+.bar { display: flex; height: 22px; border-radius: 5px; overflow: hidden; margin: 4px 0 10px; }
+.bar div { height: 100%; }
+.legend { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; color: var(--muted); }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+.problems { margin: 10px 0; padding: 10px 12px; border-radius: 7px; border: 1px solid var(--bad); color: var(--bad); }
+.ok-box { margin: 10px 0; padding: 10px 12px; border-radius: 7px; border: 1px solid var(--good); color: var(--good); }
+pre { font-family: var(--mono); font-size: 11px; white-space: pre-wrap; word-break: break-all; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 8px; max-height: 120px; overflow: auto; }
+#status { font-size: 13px; }
+details summary { cursor: pointer; color: var(--muted); }
+.opts label { display: inline-flex; gap: 6px; align-items: center; margin-right: 14px; color: var(--muted); }
+@media (max-width: 600px) { td.slider input[type=range] { width: 100px; } }
+</style>
+</head>
+<body>
+<main>
+  <h1>Hydration Rebalancer</h1>
+  <p class="sub">money market の担保を目標比率に戻す。複数のスワップを 1 つの utility.batchAll にまとめ、Talisman で署名する。借入には触れない。</p>
+
+  <section class="panel">
+    <h2>アカウント</h2>
+    <div class="row">
+      <button id="connect">Talisman に接続</button>
+      <select id="accounts" hidden></select>
+      <span class="muted">または</span>
+      <input type="text" id="address" placeholder="アドレスを貼り付け（読み取り専用）">
+      <button id="load">読み込む</button>
+    </div>
+    <p id="status" class="muted"></p>
+  </section>
+
+  <div id="app" hidden>
+    <section class="panel">
+      <h2>担保と目標比率</h2>
+      <div class="row" style="margin-bottom:10px">
+        <button id="equal">均等にする</button>
+        <button id="current">現在の比率に戻す</button>
+        <select id="add"></select>
+        <span class="muted" id="drift"></span>
+      </div>
+      <div class="table-wrap"><table id="assets"></table></div>
+      <div style="margin-top:12px">
+        <div class="muted" style="font-size:12px">現在</div><div class="bar" id="bar-now"></div>
+        <div class="muted" style="font-size:12px">目標</div><div class="bar" id="bar-target"></div>
+        <div class="legend" id="legend"></div>
+      </div>
+      <p class="muted" id="others"></p>
+    </section>
+
+    <section class="panel">
+      <h2>リスク</h2>
+      <div class="grid">
+        <div>
+          <div class="muted">Health factor</div>
+          <div id="gauges"></div>
+        </div>
+        <div class="table-wrap"><table id="risk"></table></div>
+      </div>
+      <p class="muted" style="font-size:12px;margin:8px 0 0">「目標（概算）」は oracle 価格で手数料なしの計算。「見積もり後」は実際のルート見積もり（手数料・インパクト込み）。清算までの下落率は、借入額は変わらず担保価格だけが下がる前提（ステーブル借入）。</p>
+      <p id="debts" class="muted" style="font-size:12px"></p>
+    </section>
+
+    <section class="panel">
+      <h2>見積もりと署名</h2>
+      <div class="opts row" style="margin-bottom:10px">
+        <label>スリッページ % <input type="number" id="o-slip" value="1" step="0.1" min="0.1"></label>
+        <label>HF 下限 <input type="number" id="o-minhf" value="1.5" step="0.05" min="1.05"></label>
+        <label>インパクト上限 % <input type="number" id="o-impact" value="3" step="0.5" min="0.1"></label>
+        <label>最大分割数 <input type="number" id="o-chunks" value="5" step="1" min="1" max="10"></label>
+        <label>今回の上限 USD <input type="number" id="o-maxusd" placeholder="なし" min="0"></label>
+        <label>最小の脚 USD <input type="number" id="o-minleg" value="5" min="0"></label>
+      </div>
+      <div class="row">
+        <button id="quote" class="primary">見積もり＋dry-run</button>
+        <button id="sign" disabled>Talisman で署名して送信</button>
+        <span id="age" class="muted"></span>
+      </div>
+      <div id="plan"></div>
+    </section>
+  </div>
+</main>
+<script type="module" src="app.js"></script>
+</body>
+</html>
