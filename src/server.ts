@@ -99,6 +99,7 @@ async function plan(chain: Chain, req: PlanRequest) {
     callHex: tx.method.toHex(),
     callHash: tx.method.hash.toHex(),
     quotedAt: Date.now(),
+    positions: account.positions.map(toJsonPosition), // the prices this quote was checked against
     problems,
     movedUsd: rows.reduce((s, r) => s + r.usd, 0),
     totalUsd: set.reduce((s, p) => s + valueUsd(p), 0),

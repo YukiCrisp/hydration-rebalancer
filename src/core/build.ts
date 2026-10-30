@@ -19,9 +19,7 @@ import {
   type Step,
   type StepHf,
 } from './plan.js';
-
-// Same value the Hydration SDK/UI adds for Aave-touching trades by borrowers.
-const AAVE_EXTRA_GAS = 1_000_000n;
+import { AAVE_EXTRA_GAS } from './verify.js';
 const DRY_RUN_XCM_VERSION = 4;
 
 export interface ChunkCall {
@@ -137,7 +135,7 @@ export async function quotePlan(
 
 /** Borrowers' Aave calls run out of EVM gas without the dispatcher's extra gas. */
 function wrapForAave(api: ApiPromise, call: SubmittableExtrinsic<'promise'>) {
-  return api.tx.dispatcher.dispatchWithExtraGas(call, AAVE_EXTRA_GAS);
+  return api.tx.dispatcher.dispatchWithExtraGas(call, BigInt(AAVE_EXTRA_GAS));
 }
 
 export function batch(api: ApiPromise, calls: ChunkCall[]) {

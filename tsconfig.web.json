@@ -9,7 +9,8 @@
   },
   "include": [
     "src/web",
-    "src/core/plan.ts"
+    "src/core/plan.ts",
+    "src/core/verify.ts"
   ],
   "exclude": []
 }

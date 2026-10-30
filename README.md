@@ -46,7 +46,15 @@ npm run build && npm run ui
 2. 担保にしている資産が表に並ぶ。目標の比率はスライダーで決める。% の欄に数字を入れると、その資産の比率を固定して、残りを今の比で分け直す。「均等にする」「現在の比率に戻す」のボタンもある。「＋ 資産を追加」からは、まだ持っていない資産も選べる（LTV が 0 のものと凍結中のものは除く）。対象から外した担保は動かさないが、HF の計算には入れる。比率を 0 にすると、その資産を売り切る（端数は少し残る）。
 3. リスク表には「現在」「目標（概算）」「見積もり後」の3列が並ぶ。比べるのは HF、平均 LT、借入枠の使用率、全担保が一律に下がったときに清算までの下落率、各資産が単独で下がったときの清算までの下落率。概算は oracle 価格で手数料なしの計算、見積もり後は実際のルートの見積もり（手数料とインパクト込み）。下落率の計算は、借入がステーブルである前提。そうでない借入があれば注意を出す。
 4. 「見積もり＋dry-run」を押すと、サーバーが最新の残高で計画を作り直す。そのうえで見積もり、HF の段階チェック、チャンク分割、インパクトのチェックをかけ、チェーンの `DryRunApi` で一括実行を試す。問題があれば赤い枠で出る。
-5. 問題がなく、見積もりから 60 秒以内なら「Talisman で署名して送信」を押せる。ブラウザは受け取った call を自分でデコードし、`utility.batchAll` であることと call hash が一致することを確かめてから Talisman に渡す。Ledger を Talisman につないでいれば、署名は Ledger で承認する。ブロックに入ったら残高を読み直す。
+5. 問題がなく、見積もりから 60 秒以内なら「Talisman で署名して送信」を押せる。ブラウザは受け取った call を自分でデコードし、次の点をすべて確かめてから Talisman に渡す（`src/core/verify.ts`）。1 つでも外れたら署名を中止する。
+   - 外側が `utility.batchAll` で、中身がすべて `dispatcher.dispatchWithExtraGas(router.buy)` であること。送金など、ほかの call は入れさせない。
+   - 各スワップの資産、受け取る量、払う上限が、画面の見積もりと 1 件ずつ一致すること。スワップの数も一致すること。
+   - ルートが、売る aToken から始まって買う aToken で終わり、途中でつながっていること。
+   - 払う上限が oracle 価格から見て、インパクト上限＋スリッページ（＋価格の揺れ 1%）を超えないこと。
+
+   確認ダイアログの文面は、デコードした call から作る。Ledger を Talisman につないでいれば、署名は Ledger で承認する。ブロックに入ったら残高を読み直す。
+
+   oracle 価格と資産の対応は、見積もりと一緒にローカルサーバーから受け取る。そのため、この検証が守るのは「画面に出た見積もりと、署名する中身が同じであること」。最後の砦は、Talisman と Ledger に表示される中身。
 
 最初は「今回の上限 USD」に 10 か 20 を入れて、少額で1回通すこと。Talisman で Ledger アカウント（Polkadot generic app）を使い、`CheckMetadataHash` 付きで署名する経路は、まだ実機で試していない。
 
@@ -130,4 +138,4 @@ npm test
 npm run dev -- --address <addr> --max-usd 20
 ```
 
-`src/core/plan.ts` is pure (weights, legs to any target weights, HF simulation, chunking, risk numbers) and covered by `tests/plan.test.ts`. `src/core/chain.ts` reads the market, `src/core/build.ts` quotes, builds the batch and runs the dry-run. `src/cli.ts` and `src/server.ts` (local UI API) both sit on that core. `src/web/main.ts` is the browser page, bundled by esbuild into `web/app.js`.
+`src/core/plan.ts` is pure (weights, legs to any target weights, HF simulation, chunking, risk numbers) and covered by `tests/plan.test.ts`. `src/core/verify.ts` is the pre-signing check the browser runs on the decoded call, covered by `tests/verify.test.ts`. `src/core/chain.ts` reads the market, `src/core/build.ts` quotes, builds the batch and runs the dry-run. `src/cli.ts` and `src/server.ts` (local UI API) both sit on that core. `src/web/main.ts` is the browser page, bundled by esbuild into `web/app.js`.

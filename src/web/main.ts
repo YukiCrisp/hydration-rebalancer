@@ -1,9 +1,11 @@
 // Browser side of the rebalancer UI: sliders, risk preview, Talisman signing.
 // Quotes and dry-runs come from the local server; this page decodes the call
-// it is about to sign and checks its hash before handing it to Talisman.
+// it is about to sign and checks every swap in it against the quote before
+// handing it to Talisman.
 import { ApiPromise, WsProvider } from '@polkadot/api';
 import BigNumber from 'bignumber.js';
 import { applyTrades, risk, valueUsd, type Position, type Risk } from '../core/plan.js';
+import { decodeBatch, verifyBuys, type VerifyLimits } from '../core/verify.js';
 
 interface Debt { reserveId: number; symbol: string; amount: string; usd: number }
 interface PlanRow {
@@ -17,6 +19,7 @@ interface PlanResult {
   dryRun?: { ok: boolean; error?: string; events: string[] };
   feeHdx?: number | null; callHex?: string; callHash?: string;
   quotedAt?: number; problems?: string[]; movedUsd?: number; totalUsd?: number;
+  positions?: (Omit<Position, 'balance'> & { balance: string })[];
 }
 interface InjectedAccount { address: string; name?: string; type?: string }
 interface Injected { accounts: { get(): Promise<InjectedAccount[]> }; signer: any }
@@ -43,6 +46,7 @@ const state = {
   included: [] as number[],           // reserveIds in the rebalanced set, in display order
   weights: new Map<number, number>(), // raw slider values, normalized for display
   plan: null as PlanResult | null,
+  limits: null as VerifyLimits | null, // slippage / impact the current plan was quoted with
   api: null as ApiPromise | null,
   rpc: 'wss://rpc.hydradx.cloud',
 };
@@ -359,6 +363,7 @@ async function quote() {
   try {
     const num = (id: string) => Number($<HTMLInputElement>(id).value);
     const shares = targetShares();
+    const limits = { slippagePct: num('o-slip'), maxImpactPct: num('o-impact') };
     // held collateral that is not in the set is left alone; in-set assets carry their share (0 = sell)
     state.plan = await api<PlanResult>('/api/plan', {
       method: 'POST',
@@ -366,14 +371,16 @@ async function quote() {
       body: JSON.stringify({
         address: state.address,
         weights: Object.fromEntries([...shares].map(([k, v]) => [String(k), v])),
-        slippagePct: num('o-slip'),
+        ...limits,
         minHf: num('o-minhf'),
-        maxImpactPct: num('o-impact'),
         maxChunks: num('o-chunks'),
         maxUsd: $<HTMLInputElement>('o-maxusd').value ? num('o-maxusd') : undefined,
         minLegUsd: num('o-minleg'),
       }),
     });
+    state.limits = limits;
+    // refresh balances and oracle prices to the ones the quote used; signing checks against them
+    if (state.plan.positions) state.positions = state.plan.positions.map((p) => ({ ...p, balance: new BigNumber(p.balance) }));
   } catch (e) {
     state.plan = null;
     $('plan').innerHTML = `<div class="problems">${esc((e as Error).message)}</div>`;
@@ -391,19 +398,27 @@ async function chainApi(): Promise<ApiPromise> {
 
 async function sign() {
   const plan = state.plan;
-  if (!plan?.callHex || !state.injected) return;
+  if (!plan?.callHex || !state.injected || !state.limits) return;
   const btn = $<HTMLButtonElement>('sign');
   btn.disabled = true;
   try {
     const chain = await chainApi();
-    // decode what we are about to sign ourselves and make sure it is what was dry-run
+    // decode what we are about to sign ourselves and check every swap in it
+    // against the quote on screen, so the confirm text below is what gets signed
     const call = chain.createType('Call', plan.callHex);
-    if (call.hash.toHex() !== plan.callHash) throw new Error('call hash が見積もりと一致しません。署名を中止しました。');
-    const human: any = call.toHuman();
-    if (human.section !== 'utility' || human.method !== 'batchAll') throw new Error('想定外の call です。署名を中止しました。');
+    let verified;
+    try {
+      if (call.hash.toHex() !== plan.callHash) throw new Error('call hash が見積もりと一致しません');
+      verified = verifyBuys(decodeBatch(call), plan.calls, state.positions, state.limits);
+    } catch (e) {
+      throw new Error(`署名を中止しました: ${(e as Error).message}`);
+    }
 
-    const summary = plan.calls
-      .map((c, i) => `${i + 1}. ${fmtAmt(c.amountOut)} a${c.toSymbol} を最大 ${fmtAmt(c.maxAmountIn)} a${c.fromSymbol} で買う`)
+    const summary = verified
+      .map((v, i) => {
+        const worst = `${v.worstVsOraclePct >= 0 ? '+' : ''}${v.worstVsOraclePct.toFixed(2)}%`;
+        return `${i + 1}. ${fmtAmt(v.amountOut)} a${v.to.symbol} を最大 ${fmtAmt(v.maxAmountIn)} a${v.from.symbol} で買う（最悪 oracle 比 ${worst}）`;
+      })
       .join('\n');
     if (!confirm(`次の内容で署名します（1 トランザクション）。\n\n${summary}\n\ncall hash ${plan.callHash}\n\nTalisman / Ledger の画面でも内容を確認してください。`)) {
       updateSignButton();
