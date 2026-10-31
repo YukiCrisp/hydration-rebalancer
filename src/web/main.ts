@@ -7,7 +7,7 @@ import BigNumber from 'bignumber.js';
 import { applyTrades, risk, valueUsd, type Position, type Risk } from '../core/plan.js';
 import { decodeBatch, verifyBuys, type VerifyLimits } from '../core/verify.js';
 
-interface Debt { reserveId: number; symbol: string; amount: string; usd: number }
+interface Debt { reserveId: number | null; symbol: string; amount: string; priceUsd: number; usd: number; apr: number; stable: boolean }
 interface PlanRow {
   from: number; to: number; fromSymbol: string; toSymbol: string;
   amountOut: string; amountIn: string; maxAmountIn: string; usd: number;
@@ -154,6 +154,7 @@ function quotedPositions(): Position[] | null {
 
 function render() {
   renderAssets();
+  renderBorrows();
   renderRisk();
   renderPlan();
 }
@@ -233,6 +234,34 @@ function renderAssets() {
     : '';
 }
 
+// Borrows are shown, never changed: the batch only moves collateral.
+function renderBorrows() {
+  const head = '<tr><th>資産</th><th>借入額</th><th>価格</th><th>評価額</th><th>比率</th><th>金利 (APR)</th></tr>';
+  if (!state.debts.length) {
+    $('borrows').innerHTML = `${head}<tr><td colspan="6" class="muted">借入はありません</td></tr>`;
+    $('borrows-note').textContent = '';
+    return;
+  }
+  const rowsUsd = state.debts.reduce((s, d) => s + d.usd, 0);
+  const rows = state.debts.map((d) => `<tr>
+      <td><b>${esc(d.symbol)}</b>${d.stable ? '<span class="tag">固定金利</span>' : ''}</td>
+      <td class="num">${fmtAmt(d.amount)}</td>
+      <td class="num">${fmtUsd(d.priceUsd)}</td>
+      <td class="num">${fmtUsd(d.usd)}</td>
+      <td class="num">${fmtPct(rowsUsd > 0 ? d.usd / rowsUsd : 0)}</td>
+      <td class="num">${fmtPct(d.apr, 2)}</td>
+    </tr>`);
+  $('borrows').innerHTML = `${head}${rows.join('')}
+    <tr><td><b>合計</b></td><td></td><td></td><td class="num"><b>${fmtUsd(state.debtUsd)}</b></td><td></td><td></td></tr>`;
+  // the total is the chain's own figure; flag it if the per-asset rows do not add up to it
+  const gap = Math.abs(rowsUsd - state.debtUsd);
+  $('borrows-note').innerHTML =
+    `HF の計算には合計（チェーンの値）を使います。` +
+    (gap > Math.max(1, state.debtUsd * 0.01)
+      ? ` <span class="warn">内訳の合計 ${fmtUsd(rowsUsd)} とチェーンの合計が ${fmtUsd(gap)} ずれています。</span>`
+      : '');
+}
+
 /** Set one asset's share to `share` and scale the others to fill the rest. */
 function setShare(id: number, share: number) {
   const others = state.included.filter((x) => x !== id);
@@ -291,9 +320,9 @@ function renderRisk() {
     assetRows;
 
   const nonStable = state.debts.filter((d) => !/USD|DAI|HOLLAR|EUR/i.test(d.symbol));
-  $('debts').innerHTML =
-    `借入: ${state.debts.map((d) => `${esc(d.symbol)} ${fmtAmt(d.amount, 2)} (${fmtUsd(d.usd)})`).join(', ') || 'なし'}` +
-    (nonStable.length ? ` <span class="warn">— ステーブル以外の借入があるため、下落率の数字は目安です。</span>` : '');
+  $('debts').innerHTML = nonStable.length
+    ? `<span class="warn">ステーブル以外の借入（${nonStable.map((d) => esc(d.symbol)).join(', ')}）があるため、下落率の数字は目安です。</span>`
+    : '';
 }
 
 function invalidatePlan() {

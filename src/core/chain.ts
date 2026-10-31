@@ -62,10 +62,13 @@ export async function symbolOf(api: ApiPromise, assetId: number): Promise<string
 }
 
 export interface Debt {
-  reserveId: number;
+  reserveId: number | null; // null when the reserve has no Hydration asset id
   symbol: string;
   amount: BigNumber;
+  priceUsd: number;
   usd: number;
+  apr: number;              // borrow APR, 0.05 = 5%
+  stable: boolean;          // stable-rate debt (amount is the principal, without accrued interest)
 }
 
 export interface Market {
@@ -115,15 +118,31 @@ export async function loadMarket(chain: Chain, who: Who): Promise<Market> {
       ltv: Number(c.baseLTVasCollateral) / 10_000,
       isCollateral: r.isCollateral,
     });
-    const u = userCfg.get(r.reserveAsset.toLowerCase());
-    if (u && u.scaledVariableDebt > 0n) {
-      const amount = new BigNumber(u.scaledVariableDebt.toString())
-        .times(c.variableBorrowIndex.toString())
-        .div(RAY)
-        .shiftedBy(-r.decimals);
-      debts.push({ reserveId: r.reserveId, symbol, amount, usd: amount.toNumber() * priceUsd });
+  }
+
+  // Debt is read from every reserve, not only the routable ones above:
+  // a borrow on a paused or non-routable reserve still counts against HF.
+  const reserveIds = new Map(summary.reserves.map((r) => [r.reserveAsset.toLowerCase(), r.reserveId]));
+  for (const u of userReserves) {
+    const c = cfg.get(u.underlyingAsset.toLowerCase());
+    if (!c || (u.scaledVariableDebt === 0n && u.principalStableDebt === 0n)) continue;
+    const reserveId = reserveIds.get(u.underlyingAsset.toLowerCase()) ?? null;
+    const symbol = reserveId != null ? await symbolOf(chain.api, reserveId) : c.symbol;
+    const decimals = Number(c.decimals);
+    const priceUsd = new BigNumber(c.priceInMarketReferenceCurrency.toString()).shiftedBy(-BASE_DECIMALS).toNumber();
+    const push = (raw: BigNumber, rate: bigint, stable: boolean) => {
+      const amount = raw.shiftedBy(-decimals);
+      const apr = new BigNumber(rate.toString()).div(RAY).toNumber();
+      debts.push({ reserveId, symbol, amount, priceUsd, usd: amount.toNumber() * priceUsd, apr, stable });
+    };
+    if (u.scaledVariableDebt > 0n) {
+      push(new BigNumber(u.scaledVariableDebt.toString()).times(c.variableBorrowIndex.toString()).div(RAY), c.variableBorrowRate, false);
+    }
+    if (u.principalStableDebt > 0n) {
+      push(new BigNumber(u.principalStableDebt.toString()), u.stableBorrowRate, true);
     }
   }
+  debts.sort((a, b) => b.usd - a.usd);
   const debtUsd = new BigNumber(summary.totalDebt).shiftedBy(-BASE_DECIMALS).toNumber();
   return { account: { positions, debtUsd }, debts, chainHf: summary.healthFactor, frozen };
 }
