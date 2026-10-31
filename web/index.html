@@ -35,7 +35,10 @@ table { border-collapse: collapse; width: 100%; }
 th, td { text-align: right; padding: 7px 8px; border-bottom: 1px solid var(--line); white-space: nowrap; }
 th { color: var(--muted); font-weight: 500; font-size: 12px; }
 th:first-child, td:first-child { text-align: left; }
-td.slider { min-width: 220px; }
+td.slider { min-width: 280px; }
+button.pin { font-size: 11px; padding: 1px 6px; margin-left: 4px; color: var(--muted); }
+button.pin.on { color: var(--accent); border-color: var(--accent); }
+button.pin:disabled { opacity: .6; cursor: default; }
 td.slider input[type=range] { width: 150px; vertical-align: middle; accent-color: var(--accent); }
 .num { font-variant-numeric: tabular-nums; }
 .muted { color: var(--muted); }
@@ -87,6 +90,7 @@ details summary { cursor: pointer; color: var(--muted); }
         <span class="muted" id="drift"></span>
       </div>
       <div class="table-wrap"><table id="assets"></table></div>
+      <p class="muted" style="font-size:12px;margin:6px 0 0">動かした資産は「固定」になり、そのあと別の資産を動かしても変わりません。差分は「自動」の資産で調整します。自動の資産がなくなると、いちばん前に固定した資産から自動に戻ります。</p>
       <div style="margin-top:12px">
         <div class="muted" style="font-size:12px">現在</div><div class="bar" id="bar-now"></div>
         <div class="muted" style="font-size:12px">目標</div><div class="bar" id="bar-target"></div>
