@@ -44,7 +44,8 @@ const state = {
   chainHf: 0,
   frozen: new Set<number>(),
   included: [] as number[],           // reserveIds in the rebalanced set, in display order
-  weights: new Map<number, number>(), // raw slider values, normalized for display
+  weights: new Map<number, number>(), // target % per asset, summing to 100
+  pinned: [] as number[],             // assets the user set by hand, oldest first; they hold while others absorb
   plan: null as PlanResult | null,
   limits: null as VerifyLimits | null, // slippage / impact the current plan was quoted with
   api: null as ApiPromise | null,
@@ -117,12 +118,14 @@ async function load(address: string, source: 'manual' | 'talisman') {
 // ---------- weights ----------
 
 function setEqual() {
-  state.weights = new Map(state.included.map((id) => [id, 50]));
+  state.weights = new Map(state.included.map((id) => [id, 100 / state.included.length]));
+  state.pinned = [];
 }
 
 function setCurrent() {
   const total = state.included.reduce((s, id) => s + valueUsd(byId(id)), 0);
   state.weights = new Map(state.included.map((id) => [id, total > 0 ? (valueUsd(byId(id)) / total) * 100 : 0]));
+  state.pinned = [];
 }
 
 function targetShares(): Map<number, number> {
@@ -167,7 +170,7 @@ function renderAssets() {
     const now = total > 0 ? valueUsd(p) / total : 0;
     const tgt = shares.get(id) ?? 0;
     const diff = tgt * total - valueUsd(p);
-    const raw = state.weights.get(id) ?? 0;
+    const pinned = state.pinned.includes(id);
     const tags = [
       !p.isCollateral && p.balance.gt(0) ? '<span class="tag bad">担保オフ</span>' : '',
       p.balance.isZero() ? '<span class="tag">未保有</span>' : '',
@@ -179,22 +182,31 @@ function renderAssets() {
       <td class="num">${fmtUsd(p.priceUsd)}</td>
       <td class="num">${fmtUsd(valueUsd(p))}</td>
       <td class="num">${fmtPct(now)}</td>
-      <td class="slider"><input type="range" min="0" max="100" step="0.5" value="${raw}" data-id="${id}">
-        <input type="number" min="0" max="100" step="0.5" value="${(tgt * 100).toFixed(1)}" data-pct="${id}" style="width:64px"> %</td>
-      <td class="num ${Math.abs(diff) < 1 ? 'muted' : diff > 0 ? 'good' : 'warn'}">${diff >= 0 ? '+' : '−'}${fmtUsd(Math.abs(diff))}</td>
+      <td class="slider"><input type="range" min="0" max="100" step="0.5" value="${tgt * 100}" data-id="${id}">
+        <input type="number" min="0" max="100" step="0.5" value="${(tgt * 100).toFixed(1)}" data-pct="${id}" style="width:64px"> %
+        <button class="${pinClass(pinned)}" data-unpin="${id}" ${pinned ? '' : 'disabled'} title="${pinTitle(pinned)}">${pinned ? '固定' : '自動'}</button></td>
+      <td class="${diffClass(diff)}" data-diff="${id}">${fmtDiff(diff)}</td>
       <td class="num muted">${fmtPct(p.liqThreshold, 0)} / ${fmtPct(p.ltv, 0)}</td>
       <td>${p.balance.isZero() ? `<button data-remove="${id}">外す</button>` : ''}</td>
     </tr>`;
   });
   $('assets').innerHTML = `<tr><th>資産</th><th>残高</th><th>価格</th><th>評価額</th><th>現在</th><th>目標</th><th>差額</th><th>LT / LTV</th><th></th></tr>${rows.join('')}`;
 
-  // sliders: raw weights; the % box sets this asset's share and rescales the others
+  // slider and % box both set this asset's share and pin it; only unpinned assets absorb the change.
+  // While dragging, update the rows in place: rebuilding the table would drop the slider mid-drag.
   $('assets').querySelectorAll<HTMLInputElement>('input[type=range]').forEach((el) => {
     el.oninput = () => {
-      state.weights.set(Number(el.dataset.id), Number(el.value));
+      setShare(Number(el.dataset.id), Number(el.value) / 100);
       invalidatePlan();
-      renderAssets();
+      refreshTargets(el);
       renderRisk();
+    };
+  });
+  $('assets').querySelectorAll<HTMLButtonElement>('button[data-unpin]').forEach((el) => {
+    el.onclick = () => {
+      unpin(Number(el.dataset.unpin));
+      invalidatePlan();
+      render();
     };
   });
   $('assets').querySelectorAll<HTMLInputElement>('input[data-pct]').forEach((el) => {
@@ -209,19 +221,16 @@ function renderAssets() {
       const id = Number(el.dataset.remove);
       state.included = state.included.filter((x) => x !== id);
       state.weights.delete(id);
+      state.pinned = state.pinned.filter((x) => x !== id);
+      // its share goes to the unpinned assets (or to everyone if all are pinned)
+      if (state.included.every((x) => state.pinned.includes(x))) state.pinned = [];
+      fillFree(100 - state.pinned.reduce((s, x) => s + (state.weights.get(x) ?? 0), 0));
       invalidatePlan();
       render();
     };
   });
 
-  const bar = (shareOf: (id: number) => number) =>
-    state.included.map((id) => `<div style="width:${shareOf(id) * 100}%;background:${colorOf(id)}" title="${esc(byId(id).symbol)}"></div>`).join('');
-  $('bar-now').innerHTML = bar((id) => (total > 0 ? valueUsd(byId(id)) / total : 0));
-  $('bar-target').innerHTML = bar((id) => shares.get(id) ?? 0);
-  $('legend').innerHTML = state.included.map((id) => `<span><i style="background:${colorOf(id)}"></i>${esc(byId(id).symbol)}</span>`).join('');
-
-  const drift = Math.max(0, ...state.included.map((id) => Math.abs((total > 0 ? valueUsd(byId(id)) / total : 0) - (shares.get(id) ?? 0))));
-  $('drift').textContent = `目標との最大のずれ ${(drift * 100).toFixed(1)} pt ・ 合計 ${fmtUsd(total)}`;
+  renderBars();
 
   const addable = state.positions.filter((p) => !state.included.includes(p.reserveId) && p.ltv > 0 && !state.frozen.has(p.reserveId));
   $('add').innerHTML = `<option value="">＋ 資産を追加</option>${addable
@@ -232,6 +241,48 @@ function renderAssets() {
   $('others').textContent = others.length
     ? `対象外の担保（そのまま、HF には含む）: ${others.map((p) => `${p.symbol} ${fmtUsd(valueUsd(p))}`).join(', ')}`
     : '';
+}
+
+const pinClass = (pinned: boolean) => `pin${pinned ? ' on' : ''}`;
+const pinTitle = (pinned: boolean) => (pinned ? '固定を外す（他の資産の変更に合わせて動くようになります）' : '動かすと固定されます');
+const diffClass = (diff: number) => `num ${Math.abs(diff) < 1 ? 'muted' : diff > 0 ? 'good' : 'warn'}`;
+const fmtDiff = (diff: number) => `${diff >= 0 ? '+' : '−'}${fmtUsd(Math.abs(diff))}`;
+
+/** Update target %, pin state and diff of every row in place, leaving `active` (the slider being dragged) alone. */
+function refreshTargets(active: HTMLInputElement) {
+  const shares = targetShares();
+  const total = state.included.reduce((s, id) => s + valueUsd(byId(id)), 0);
+  const table = $('assets');
+  for (const id of state.included) {
+    const tgt = shares.get(id) ?? 0;
+    const pinned = state.pinned.includes(id);
+    const range = table.querySelector<HTMLInputElement>(`input[data-id="${id}"]`)!;
+    if (range !== active) range.value = String(tgt * 100);
+    table.querySelector<HTMLInputElement>(`input[data-pct="${id}"]`)!.value = (tgt * 100).toFixed(1);
+    const pin = table.querySelector<HTMLButtonElement>(`button[data-unpin="${id}"]`)!;
+    pin.className = pinClass(pinned);
+    pin.disabled = !pinned;
+    pin.title = pinTitle(pinned);
+    pin.textContent = pinned ? '固定' : '自動';
+    const diff = tgt * total - valueUsd(byId(id));
+    const cell = table.querySelector<HTMLElement>(`td[data-diff="${id}"]`)!;
+    cell.className = diffClass(diff);
+    cell.textContent = fmtDiff(diff);
+  }
+  renderBars();
+}
+
+function renderBars() {
+  const shares = targetShares();
+  const total = state.included.reduce((s, id) => s + valueUsd(byId(id)), 0);
+  const bar = (shareOf: (id: number) => number) =>
+    state.included.map((id) => `<div style="width:${shareOf(id) * 100}%;background:${colorOf(id)}" title="${esc(byId(id).symbol)}"></div>`).join('');
+  $('bar-now').innerHTML = bar((id) => (total > 0 ? valueUsd(byId(id)) / total : 0));
+  $('bar-target').innerHTML = bar((id) => shares.get(id) ?? 0);
+  $('legend').innerHTML = state.included.map((id) => `<span><i style="background:${colorOf(id)}"></i>${esc(byId(id).symbol)}</span>`).join('');
+
+  const drift = Math.max(0, ...state.included.map((id) => Math.abs((total > 0 ? valueUsd(byId(id)) / total : 0) - (shares.get(id) ?? 0))));
+  $('drift').textContent = `目標との最大のずれ ${(drift * 100).toFixed(1)} pt ・ 合計 ${fmtUsd(total)}`;
 }
 
 // Borrows are shown, never changed: the batch only moves collateral.
@@ -262,16 +313,35 @@ function renderBorrows() {
       : '');
 }
 
-/** Set one asset's share to `share` and scale the others to fill the rest. */
+/**
+ * Set one asset's share to `share` and pin it. Assets set earlier stay where
+ * they are; only unpinned ones scale to fill the rest. When nothing unpinned
+ * is left (or the pinned ones no longer fit), the oldest pins give way first.
+ */
 function setShare(id: number, share: number) {
-  const others = state.included.filter((x) => x !== id);
-  const otherSum = others.reduce((s, x) => s + (state.weights.get(x) ?? 0), 0);
-  const total = 100;
-  state.weights.set(id, share * total);
-  for (const x of others) {
-    const w = otherSum > 0 ? (state.weights.get(x) ?? 0) / otherSum : 1 / others.length;
-    state.weights.set(x, w * (1 - share) * total);
+  const pct = Math.min(100, Math.max(0, share * 100));
+  state.weights.set(id, pct);
+  state.pinned = [...state.pinned.filter((x) => x !== id && state.included.includes(x)), id];
+  const held = () => state.pinned.filter((x) => x !== id);
+  const heldSum = () => held().reduce((s, x) => s + (state.weights.get(x) ?? 0), 0);
+  const free = () => state.included.filter((x) => !state.pinned.includes(x));
+  while (held().length && (!free().length || heldSum() > 100 - pct)) {
+    state.pinned = state.pinned.filter((x) => x !== held()[0]);
   }
+  fillFree(100 - pct - heldSum());
+}
+
+/** Spread `rest` % over the unpinned assets, keeping their proportions. */
+function fillFree(rest: number) {
+  const free = state.included.filter((x) => !state.pinned.includes(x));
+  const sum = free.reduce((s, x) => s + (state.weights.get(x) ?? 0), 0);
+  for (const x of free) state.weights.set(x, Math.max(0, sum > 0 ? ((state.weights.get(x) ?? 0) / sum) * rest : rest / free.length));
+}
+
+function unpin(id: number) {
+  state.pinned = state.pinned.filter((x) => x !== id);
+  const pinnedSum = state.pinned.reduce((s, x) => s + (state.weights.get(x) ?? 0), 0);
+  fillFree(100 - pinnedSum);
 }
 
 function hfClass(hf: number) {
