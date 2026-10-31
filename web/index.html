@@ -39,6 +39,10 @@ td.slider { min-width: 280px; }
 button.pin { font-size: 11px; padding: 1px 6px; margin-left: 4px; color: var(--muted); }
 button.pin.on { color: var(--accent); border-color: var(--accent); }
 button.pin:disabled { opacity: .6; cursor: default; }
+td.add input { width: 110px; border-color: var(--accent); }
+.sim-toggle { display: inline-flex; gap: 6px; align-items: center; margin-left: auto; color: var(--muted); }
+.sim-banner { display: none; margin: 0 0 16px; padding: 10px 12px; border-radius: 7px; border: 1px dashed var(--accent); color: var(--accent); }
+#app.sim .sim-banner { display: block; }
 td.slider input[type=range] { width: 150px; vertical-align: middle; accent-color: var(--accent); }
 .num { font-variant-numeric: tabular-nums; }
 .muted { color: var(--muted); }
@@ -81,6 +85,7 @@ details summary { cursor: pointer; color: var(--muted); }
   </section>
 
   <div id="app" hidden>
+    <div class="sim-banner">シミュレーション中：「追加予定」に入れた入金・借入を今の残高に上乗せして計算しています。チェーンには何も送りません。価格は oracle どおりに入金できる前提です。</div>
     <section class="panel">
       <h2>担保と目標比率</h2>
       <div class="row" style="margin-bottom:10px">
@@ -88,11 +93,12 @@ details summary { cursor: pointer; color: var(--muted); }
         <button id="current">現在の比率に戻す</button>
         <select id="add"></select>
         <span class="muted" id="drift"></span>
+        <label class="sim-toggle"><input type="checkbox" id="sim"> シミュレーション（入金予定を上乗せ）</label>
       </div>
       <div class="table-wrap"><table id="assets"></table></div>
       <p class="muted" style="font-size:12px;margin:6px 0 0">動かした資産は「固定」になり、そのあと別の資産を動かしても変わりません。差分は「自動」の資産で調整します。自動の資産がなくなると、いちばん前に固定した資産から自動に戻ります。</p>
       <div style="margin-top:12px">
-        <div class="muted" style="font-size:12px">現在</div><div class="bar" id="bar-now"></div>
+        <div class="muted" style="font-size:12px" id="bar-now-label">現在</div><div class="bar" id="bar-now"></div>
         <div class="muted" style="font-size:12px">目標</div><div class="bar" id="bar-target"></div>
         <div class="legend" id="legend"></div>
       </div>

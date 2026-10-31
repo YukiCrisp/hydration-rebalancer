@@ -12,6 +12,7 @@ import {
   simulateSteps,
   splitAmount,
   valueUsd,
+  withDeposits,
   type Account,
   type Position,
 } from '../src/core/plan.js';
@@ -158,5 +159,18 @@ describe('risk', () => {
     expect(after[0].balance.toNumber()).toBeCloseTo(70, 9);
     expect(after[1].balance.toNumber()).toBeCloseTo(2.9, 9);
     expect(after[1].isCollateral).toBe(true);
+  });
+
+  it('withDeposits adds to balances and turns collateral on only for new positions', () => {
+    const fresh = { ...pos(3, 0, 10), isCollateral: false };
+    const off = { ...pos(4, 50, 1), isCollateral: false };
+    const deposits = new Map([[1, new BigNumber(20)], [3, new BigNumber(5)], [4, new BigNumber(10)]]);
+    const [a, b, c] = withDeposits([pos(1, 100, 1), fresh, off], deposits);
+    expect(a.balance.toNumber()).toBeCloseTo(120, 9);
+    expect(b.balance.toNumber()).toBeCloseTo(5, 9);
+    expect(b.isCollateral).toBe(true);
+    expect(c.balance.toNumber()).toBeCloseTo(60, 9);
+    expect(c.isCollateral).toBe(false);
+    expect(risk([a, b], 100).collateralUsd).toBeCloseTo(170, 9);
   });
 });
