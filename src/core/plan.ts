@@ -276,3 +276,18 @@ export function applyTrades(
   }
   return [...next.values()];
 }
+
+/**
+ * Positions after planned deposits (human units per reserveId), for what-if
+ * views. Like a real supply, a deposit into a collateral-capable reserve the
+ * user does not hold yet turns collateral on; an existing "collateral off"
+ * position stays off.
+ */
+export function withDeposits(positions: Position[], deposits: Map<number, BigNumber>): Position[] {
+  return positions.map((p) => {
+    const add = deposits.get(p.reserveId);
+    if (!add || !add.gt(0)) return p;
+    const isCollateral = p.isCollateral || (p.balance.isZero() && p.ltv > 0);
+    return { ...p, balance: p.balance.plus(add), isCollateral };
+  });
+}

@@ -4,7 +4,7 @@
 // handing it to Talisman.
 import { ApiPromise, WsProvider } from '@polkadot/api';
 import BigNumber from 'bignumber.js';
-import { applyTrades, risk, valueUsd, type Position, type Risk } from '../core/plan.js';
+import { applyTrades, risk, valueUsd, withDeposits, type Position, type Risk } from '../core/plan.js';
 import { decodeBatch, verifyBuys, type VerifyLimits } from '../core/verify.js';
 
 interface Debt { reserveId: number | null; symbol: string; amount: string; priceUsd: number; usd: number; apr: number; stable: boolean }
@@ -38,7 +38,12 @@ const state = {
   address: '',
   source: 'manual' as 'manual' | 'talisman',
   injected: null as Injected | null,
-  positions: [] as Position[],
+  positions: [] as Position[],        // on-chain balances
+  view: [] as Position[],             // what the page works with: on-chain, plus planned deposits in simulation
+  sim: false,
+  addSupply: new Map<number, string>(), // reserveId -> planned deposit (token units, as typed)
+  addBorrow: new Map<string, string>(), // debtKey -> planned extra borrow (token units, as typed)
+  newBorrows: [] as number[],           // reserveIds with a planned borrow but no current debt
   debts: [] as Debt[],
   debtUsd: 0,
   chainHf: 0,
@@ -52,7 +57,51 @@ const state = {
   rpc: 'wss://rpc.hydradx.cloud',
 };
 
-const byId = (id: number) => state.positions.find((p) => p.reserveId === id)!;
+const byId = (id: number) => state.view.find((p) => p.reserveId === id)!;
+const onChain = (id: number) => state.positions.find((p) => p.reserveId === id)!;
+
+// ---------- simulation ----------
+
+const debtKey = (d: { reserveId: number | null; symbol: string }) => String(d.reserveId ?? d.symbol);
+const typed = (s: string | undefined) => {
+  const n = new BigNumber(s ?? '');
+  return n.isFinite() && n.gt(0) ? n : new BigNumber(0);
+};
+
+/** Recompute the working positions from on-chain balances and, in simulation, the planned deposits. */
+function applySim() {
+  if (!state.sim) {
+    state.view = state.positions;
+    return;
+  }
+  state.view = withDeposits(state.positions, new Map([...state.addSupply].map(([id, s]) => [id, typed(s)])));
+}
+
+/** Planned extra borrows as rows: existing debts first, then new ones. */
+function plannedBorrows(): { key: string; symbol: string; priceUsd: number; amount: BigNumber }[] {
+  if (!state.sim) return [];
+  const rows = [
+    ...state.debts.map((d) => ({ key: debtKey(d), symbol: d.symbol, priceUsd: d.priceUsd })),
+    ...state.newBorrows.map((id) => ({ key: String(id), symbol: onChain(id).symbol, priceUsd: onChain(id).priceUsd })),
+  ];
+  return rows.map((r) => ({ ...r, amount: typed(state.addBorrow.get(r.key)) }));
+}
+
+/** Debt the page works with: the chain's total, plus planned borrows in simulation. */
+const debtUsd = () => state.debtUsd + plannedBorrows().reduce((s, b) => s + b.amount.toNumber() * b.priceUsd, 0);
+
+function setSim(on: boolean) {
+  state.sim = on;
+  if (!on) {
+    state.addSupply.clear();
+    state.addBorrow.clear();
+    state.newBorrows = [];
+  }
+  applySim();
+  state.plan = null;
+  $('app').classList.toggle('sim', on);
+  render();
+}
 const colorOf = (id: number) => COLORS[state.included.indexOf(id) % COLORS.length];
 
 function status(msg: string, cls = 'muted') {
@@ -102,7 +151,10 @@ async function load(address: string, source: 'manual' | 'talisman') {
     state.debts = m.debts;
     state.chainHf = m.chainHf;
     state.frozen = new Set(m.frozen);
-    state.included = state.positions.filter((p) => p.isCollateral && p.balance.gt(0)).map((p) => p.reserveId);
+    // planned amounts survive a reload (e.g. switching accounts keeps the what-if)
+    state.newBorrows = state.newBorrows.filter((id) => !state.debts.some((d) => d.reserveId === id));
+    applySim();
+    state.included = state.view.filter((p) => p.isCollateral && p.balance.gt(0)).map((p) => p.reserveId);
     setEqual();
     state.plan = null;
     $('app').hidden = false;
@@ -137,7 +189,7 @@ function targetShares(): Map<number, number> {
 function estimatedTargetPositions(): Position[] {
   const shares = targetShares();
   const total = state.included.reduce((s, id) => s + valueUsd(byId(id)), 0);
-  return state.positions.map((p) => {
+  return state.view.map((p) => {
     if (!shares.has(p.reserveId)) return p;
     const usd = total * shares.get(p.reserveId)!;
     return { ...p, balance: new BigNumber(usd / p.priceUsd), isCollateral: p.isCollateral || (usd > 0 && p.ltv > 0) };
@@ -178,7 +230,8 @@ function renderAssets() {
     ].join('');
     return `<tr>
       <td><i style="display:inline-block;width:9px;height:9px;border-radius:2px;background:${colorOf(id)};margin-right:6px"></i><b>${esc(p.symbol)}</b>${tags}</td>
-      <td class="num">${fmtAmt(p.balance)}</td>
+      <td class="num">${fmtAmt(onChain(id).balance)}</td>
+      ${state.sim ? `<td class="num add"><input type="number" min="0" step="any" placeholder="0" value="${esc(state.addSupply.get(id) ?? '')}" data-add="${id}"></td>` : ''}
       <td class="num">${fmtUsd(p.priceUsd)}</td>
       <td class="num">${fmtUsd(valueUsd(p))}</td>
       <td class="num">${fmtPct(now)}</td>
@@ -187,10 +240,24 @@ function renderAssets() {
         <button class="${pinClass(pinned)}" data-unpin="${id}" ${pinned ? '' : 'disabled'} title="${pinTitle(pinned)}">${pinned ? '固定' : '自動'}</button></td>
       <td class="${diffClass(diff)}" data-diff="${id}">${fmtDiff(diff)}</td>
       <td class="num muted">${fmtPct(p.liqThreshold, 0)} / ${fmtPct(p.ltv, 0)}</td>
-      <td>${p.balance.isZero() ? `<button data-remove="${id}">外す</button>` : ''}</td>
+      <td>${onChain(id).balance.isZero() ? `<button data-remove="${id}">外す</button>` : ''}</td>
     </tr>`;
   });
-  $('assets').innerHTML = `<tr><th>資産</th><th>残高</th><th>価格</th><th>評価額</th><th>現在</th><th>目標</th><th>差額</th><th>LT / LTV</th><th></th></tr>${rows.join('')}`;
+  const head = state.sim
+    ? '<th>資産</th><th>残高</th><th>追加予定</th><th>価格</th><th>入金後の評価額</th><th>入金後</th>'
+    : '<th>資産</th><th>残高</th><th>価格</th><th>評価額</th><th>現在</th>';
+  $('assets').innerHTML = `<tr>${head}<th>目標</th><th>差額</th><th>LT / LTV</th><th></th></tr>${rows.join('')}`;
+
+  $('assets').querySelectorAll<HTMLInputElement>('input[data-add]').forEach((el) => {
+    el.onchange = () => {
+      const id = Number(el.dataset.add);
+      if (typed(el.value).gt(0)) state.addSupply.set(id, el.value.trim());
+      else state.addSupply.delete(id);
+      applySim();
+      // keep the current target weights; the new money is spread by them
+      render();
+    };
+  });
 
   // slider and % box both set this asset's share and pin it; only unpinned assets absorb the change.
   // While dragging, update the rows in place: rebuilding the table would drop the slider mid-drag.
@@ -221,6 +288,8 @@ function renderAssets() {
       const id = Number(el.dataset.remove);
       state.included = state.included.filter((x) => x !== id);
       state.weights.delete(id);
+      state.addSupply.delete(id);
+      applySim();
       state.pinned = state.pinned.filter((x) => x !== id);
       // its share goes to the unpinned assets (or to everyone if all are pinned)
       if (state.included.every((x) => state.pinned.includes(x))) state.pinned = [];
@@ -232,12 +301,12 @@ function renderAssets() {
 
   renderBars();
 
-  const addable = state.positions.filter((p) => !state.included.includes(p.reserveId) && p.ltv > 0 && !state.frozen.has(p.reserveId));
+  const addable = state.view.filter((p) => !state.included.includes(p.reserveId) && p.ltv > 0 && !state.frozen.has(p.reserveId));
   $('add').innerHTML = `<option value="">＋ 資産を追加</option>${addable
     .map((p) => `<option value="${p.reserveId}">${esc(p.symbol)}${p.balance.gt(0) ? `（保有 ${fmtUsd(valueUsd(p))}）` : ''}</option>`)
     .join('')}`;
 
-  const others = state.positions.filter((p) => p.isCollateral && p.balance.gt(0) && !state.included.includes(p.reserveId));
+  const others = state.view.filter((p) => p.isCollateral && p.balance.gt(0) && !state.included.includes(p.reserveId));
   $('others').textContent = others.length
     ? `対象外の担保（そのまま、HF には含む）: ${others.map((p) => `${p.symbol} ${fmtUsd(valueUsd(p))}`).join(', ')}`
     : '';
@@ -277,6 +346,7 @@ function renderBars() {
   const total = state.included.reduce((s, id) => s + valueUsd(byId(id)), 0);
   const bar = (shareOf: (id: number) => number) =>
     state.included.map((id) => `<div style="width:${shareOf(id) * 100}%;background:${colorOf(id)}" title="${esc(byId(id).symbol)}"></div>`).join('');
+  $('bar-now-label').textContent = state.sim ? '入金後' : '現在';
   $('bar-now').innerHTML = bar((id) => (total > 0 ? valueUsd(byId(id)) / total : 0));
   $('bar-target').innerHTML = bar((id) => shares.get(id) ?? 0);
   $('legend').innerHTML = state.included.map((id) => `<span><i style="background:${colorOf(id)}"></i>${esc(byId(id).symbol)}</span>`).join('');
@@ -286,31 +356,70 @@ function renderBars() {
 }
 
 // Borrows are shown, never changed: the batch only moves collateral.
+// In simulation, planned extra borrows are added on top for the risk numbers.
 function renderBorrows() {
-  const head = '<tr><th>資産</th><th>借入額</th><th>価格</th><th>評価額</th><th>比率</th><th>金利 (APR)</th></tr>';
-  if (!state.debts.length) {
-    $('borrows').innerHTML = `${head}<tr><td colspan="6" class="muted">借入はありません</td></tr>`;
+  const planned = new Map(plannedBorrows().map((b) => [b.key, b]));
+  const rows = [
+    ...state.debts.map((d) => ({ key: debtKey(d), symbol: d.symbol, amount: new BigNumber(d.amount), priceUsd: d.priceUsd, apr: d.apr as number | null, stable: d.stable })),
+    ...(state.sim ? state.newBorrows : []).map((id) => ({ key: String(id), symbol: onChain(id).symbol, amount: new BigNumber(0), priceUsd: onChain(id).priceUsd, apr: null, stable: false })),
+  ].map((r) => ({ ...r, usd: r.amount.plus(planned.get(r.key)?.amount ?? 0).toNumber() * r.priceUsd }));
+  const cols = state.sim ? 7 : 6;
+  const head = `<tr><th>資産</th><th>借入額</th>${state.sim ? '<th>追加予定</th>' : ''}<th>価格</th><th>${state.sim ? '入金後の評価額' : '評価額'}</th><th>比率</th><th>金利 (APR)</th></tr>`;
+  const addRow = state.sim
+    ? `<tr><td colspan="${cols}"><select id="add-borrow"><option value="">＋ 借入を追加</option>${state.positions
+        .filter((p) => !rows.some((r) => r.key === String(p.reserveId)))
+        .map((p) => `<option value="${p.reserveId}">${esc(p.symbol)}</option>`)
+        .join('')}</select></td></tr>`
+    : '';
+  if (!rows.length) {
+    $('borrows').innerHTML = `${head}<tr><td colspan="${cols}" class="muted">借入はありません</td></tr>${addRow}`;
     $('borrows-note').textContent = '';
+    wireBorrows();
     return;
   }
-  const rowsUsd = state.debts.reduce((s, d) => s + d.usd, 0);
-  const rows = state.debts.map((d) => `<tr>
-      <td><b>${esc(d.symbol)}</b>${d.stable ? '<span class="tag">固定金利</span>' : ''}</td>
-      <td class="num">${fmtAmt(d.amount)}</td>
-      <td class="num">${fmtUsd(d.priceUsd)}</td>
-      <td class="num">${fmtUsd(d.usd)}</td>
-      <td class="num">${fmtPct(rowsUsd > 0 ? d.usd / rowsUsd : 0)}</td>
-      <td class="num">${fmtPct(d.apr, 2)}</td>
+  const rowsUsd = rows.reduce((s, r) => s + r.usd, 0);
+  const body = rows.map((r) => `<tr>
+      <td><b>${esc(r.symbol)}</b>${r.stable ? '<span class="tag">固定金利</span>' : ''}</td>
+      <td class="num">${fmtAmt(r.amount)}</td>
+      ${state.sim ? `<td class="num add"><input type="number" min="0" step="any" placeholder="0" value="${esc(state.addBorrow.get(r.key) ?? '')}" data-borrow="${esc(r.key)}"></td>` : ''}
+      <td class="num">${fmtUsd(r.priceUsd)}</td>
+      <td class="num">${fmtUsd(r.usd)}</td>
+      <td class="num">${fmtPct(rowsUsd > 0 ? r.usd / rowsUsd : 0)}</td>
+      <td class="num">${r.apr != null ? fmtPct(r.apr, 2) : '—'}</td>
     </tr>`);
-  $('borrows').innerHTML = `${head}${rows.join('')}
-    <tr><td><b>合計</b></td><td></td><td></td><td class="num"><b>${fmtUsd(state.debtUsd)}</b></td><td></td><td></td></tr>`;
+  const total = state.sim
+    ? `<td class="num"><b>${fmtUsd(debtUsd())}</b> <span class="muted">（現在 ${fmtUsd(state.debtUsd)}）</span></td>`
+    : `<td class="num"><b>${fmtUsd(state.debtUsd)}</b></td>`;
+  $('borrows').innerHTML = `${head}${body.join('')}
+    <tr><td><b>合計</b></td><td></td>${state.sim ? '<td></td>' : ''}<td></td>${total}<td></td><td></td></tr>${addRow}`;
   // the total is the chain's own figure; flag it if the per-asset rows do not add up to it
-  const gap = Math.abs(rowsUsd - state.debtUsd);
+  const chainRowsUsd = state.debts.reduce((s, d) => s + d.usd, 0);
+  const gap = Math.abs(chainRowsUsd - state.debtUsd);
   $('borrows-note').innerHTML =
-    `HF の計算には合計（チェーンの値）を使います。` +
+    `HF の計算には合計（チェーンの値${state.sim ? ' ＋ 追加予定' : ''}）を使います。` +
     (gap > Math.max(1, state.debtUsd * 0.01)
-      ? ` <span class="warn">内訳の合計 ${fmtUsd(rowsUsd)} とチェーンの合計が ${fmtUsd(gap)} ずれています。</span>`
+      ? ` <span class="warn">内訳の合計 ${fmtUsd(chainRowsUsd)} とチェーンの合計が ${fmtUsd(gap)} ずれています。</span>`
       : '');
+  wireBorrows();
+}
+
+function wireBorrows() {
+  $('borrows').querySelectorAll<HTMLInputElement>('input[data-borrow]').forEach((el) => {
+    el.onchange = () => {
+      if (typed(el.value).gt(0)) state.addBorrow.set(el.dataset.borrow!, el.value.trim());
+      else state.addBorrow.delete(el.dataset.borrow!);
+      render();
+    };
+  });
+  const add = document.getElementById('add-borrow') as HTMLSelectElement | null;
+  if (add) {
+    add.onchange = () => {
+      const id = Number(add.value);
+      if (!id) return;
+      state.newBorrows.push(id);
+      render();
+    };
+  }
 }
 
 /**
@@ -362,18 +471,22 @@ function gauge(label: string, hf: number) {
 
 function renderRisk() {
   const now = risk(state.positions, state.debtUsd);
-  const est = risk(estimatedTargetPositions(), state.debtUsd);
+  const after = state.sim ? risk(state.view, debtUsd()) : null;
+  const est = risk(estimatedTargetPositions(), debtUsd());
   const qp = quotedPositions();
   const quoted = qp ? risk(qp, state.debtUsd) : null;
   const worstMid = state.plan?.calls?.length ? Math.min(...state.plan.calls.map((c) => c.hfAfterWithdraw)) : null;
 
   $('gauges').innerHTML =
     gauge('現在', now.hf) +
-    gauge('目標（概算）', est.hf) +
+    (after ? gauge('入金後', after.hf) : '') +
+    gauge(after ? '入金後に目標比率（概算）' : '目標（概算）', est.hf) +
     (quoted ? gauge('見積もり後', quoted.hf) : '') +
     (worstMid != null ? gauge('途中の最低（withdraw 直後）', worstMid) : '');
 
-  const cols: [string, Risk | null][] = [['現在', now], ['目標（概算）', est], ['見積もり後', quoted]];
+  const cols: [string, Risk | null][] = after
+    ? [['現在', now], ['入金後', after], ['入金後に目標比率（概算）', est]]
+    : [['現在', now], ['目標（概算）', est], ['見積もり後', quoted]];
   const row = (label: string, f: (r: Risk) => string) =>
     `<tr><td>${label}</td>${cols.map(([, r]) => `<td class="num">${r ? f(r) : '—'}</td>`).join('')}</tr>`;
   const drop = (x: number | null) => (x == null ? '清算なし' : fmtPct(x));
@@ -384,14 +497,16 @@ function renderRisk() {
     `<tr><th></th>${cols.map(([h]) => `<th>${h}</th>`).join('')}</tr>` +
     row('Health factor', (r) => `<span class="${hfClass(r.hf)}">${fmtHf(r.hf)}</span>`) +
     row('担保合計', (r) => fmtUsd(r.collateralUsd)) +
+    row('借入合計', (r) => fmtUsd(r.debtUsd)) +
     row('平均 LT', (r) => fmtPct(r.avgLt)) +
     row('借入枠の使用率', (r) => fmtPct(r.utilization)) +
     row('全担保一律の下落で清算', (r) => drop(r.uniformDropToLiq)) +
     assetRows;
 
-  const nonStable = state.debts.filter((d) => !/USD|DAI|HOLLAR|EUR/i.test(d.symbol));
+  const borrowed = [...state.debts.map((d) => d.symbol), ...plannedBorrows().filter((b) => b.amount.gt(0)).map((b) => b.symbol)];
+  const nonStable = [...new Set(borrowed.filter((sym) => !/USD|DAI|HOLLAR|EUR/i.test(sym)))];
   $('debts').innerHTML = nonStable.length
-    ? `<span class="warn">ステーブル以外の借入（${nonStable.map((d) => esc(d.symbol)).join(', ')}）があるため、下落率の数字は目安です。</span>`
+    ? `<span class="warn">ステーブル以外の借入（${nonStable.map(esc).join(', ')}）があるため、下落率の数字は目安です。</span>`
     : '';
 }
 
@@ -404,6 +519,16 @@ function invalidatePlan() {
 function renderPlan() {
   const plan = state.plan;
   const signBtn = $<HTMLButtonElement>('sign');
+  const quoteBtn = $<HTMLButtonElement>('quote');
+  // a what-if has no on-chain balances to swap from, so nothing here may be quoted or signed
+  quoteBtn.disabled = state.sim;
+  quoteBtn.title = state.sim ? 'シミュレーション中は見積もりも署名もできません' : '';
+  if (state.sim) {
+    $('plan').innerHTML = '<p class="muted">シミュレーション中です。入金を済ませてからシミュレーションをオフにすると、見積もりと署名ができます。</p>';
+    signBtn.disabled = true;
+    $('age').textContent = '';
+    return;
+  }
   if (!plan) {
     $('plan').innerHTML = '';
     signBtn.disabled = true;
@@ -456,6 +581,7 @@ function updateSignButton() {
 // ---------- quote & sign ----------
 
 async function quote() {
+  if (state.sim) return;
   const btn = $<HTMLButtonElement>('quote');
   btn.disabled = true;
   btn.textContent = '見積もり中…';
@@ -480,6 +606,7 @@ async function quote() {
     state.limits = limits;
     // refresh balances and oracle prices to the ones the quote used; signing checks against them
     if (state.plan.positions) state.positions = state.plan.positions.map((p) => ({ ...p, balance: new BigNumber(p.balance) }));
+    applySim();
   } catch (e) {
     state.plan = null;
     $('plan').innerHTML = `<div class="problems">${esc((e as Error).message)}</div>`;
@@ -569,6 +696,7 @@ $('add').onchange = () => {
   render();
 };
 $('quote').onclick = quote;
+$<HTMLInputElement>('sim').onchange = (e) => setSim((e.target as HTMLInputElement).checked);
 $('sign').onclick = sign;
 document.querySelectorAll('.opts input').forEach((el) => el.addEventListener('change', () => { invalidatePlan(); renderRisk(); }));
 setInterval(() => state.plan && updateSignButton(), 1000);
